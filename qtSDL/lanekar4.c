@@ -1,0 +1,1173 @@
+/*  lanekar4.h
+    Lane marker extraction and centerline estimation.
+    Keith A. Redmill   17 February 2011  cleanup and generalize
+    Keith A. Redmill   Smarteye versions 1997-July 1999
+                       Windows/Matrox MIL version August 1999-February 2000
+    Derived from earlier code, including 
+        vision5.c    23 Oct 1996
+        minidemo.c   5 Aug 1997
+        winding.c    7 Oct 1997
+        try_this.c   20 Aug 1998
+        lanekar3.c   14 May 1999
+        ln3-wrc.c    23 July 1999 
+        vis2.c/l.c   30 Aug 1999/25 Feb 2000
+*/
+
+
+#define YELLOW 0
+#define GREEN 0
+
+#define PI 3.141592
+
+float max(float num[], int lgth)
+{
+    float max = num[0];   
+    for (int i = 1; i < lgth; i++)
+		if (num[i] > max)
+			max = num[i];
+		return max;                
+}
+
+int hessian_ptdtr(float sigma, float hthres, unsigned char *camera, int *xCoords, int  *yCoords, SDL_Surface *screen )
+{
+	int m = 480;
+	int n = 640;
+        unsigned char** ig = new unsigned char* [m]();
+	int gSize = 2 * (round(3 * sigma)) + 1;
+	float thres;
+	int **x = new int* [gSize];
+	int **y = new int* [gSize];
+	int *temp = new int [gSize];
+	float **dGxx = new float* [gSize];
+	float **dGyy = new float* [gSize];
+	float **dGxy = new float* [gSize];
+	float **hxx = new float* [m];
+	float **hyy = new float* [m];
+	float **hxy = new float* [m];
+	float **detH = new float* [m];
+        
+        for(int j = 0; j < m; j++)
+        {
+          ig[j] = new unsigned char[n]();
+          for(int i = 0; i < n; i++)
+            ig[j][i] = camera[i + (j * n)];
+        }
+
+	 *temp = -round(3 * sigma); 
+	
+	 for (int i = 0; i < gSize; i++) 
+	 	temp[i + 1] = temp[i] + 1; 
+
+	 //Copy temp into x and y to form a grid
+	 for (int j = 0; j < gSize; j++)
+	   {
+	     x[j] = new int [gSize];
+	     for (int i = 0; i < gSize; i++)
+                x[j][i] = temp[i];
+	   }
+         for (int j = 0; j < gSize; j++)
+	   {
+	     y[j] = new int [gSize];
+	     for (int i = 0; i < gSize; i++)
+                y[j][i] = x[i][j];
+	   }
+
+	 delete[] temp; 
+
+	 //Find the second derivatives
+	 for (int j = 0; j < gSize; j++)
+	   {
+	     dGxx[j] = new float [gSize];
+	     for (int i = 0; i < gSize; i++)
+	       dGxx[j][i] = (1 / (2 * PI * pow(sigma, 4)))
+                             * ((pow((float)x[j][i], 2) / pow(sigma, 2)) - 1) *
+		            exp(-(pow((float)x[j][i], 2) + pow((float)y[j][i], 2))
+                             / (2 * pow(sigma, 2)));
+	   }
+	 for (int j = 0; j < gSize; j++)
+	   {
+	     dGyy[j] = new float [gSize];
+	     for (int i = 0; i < gSize; i++)
+	       dGyy[j][i] = dGxx[i][j];
+	   }
+	 for (int j = 0; j < gSize; j++)
+	   {
+	     dGxy[j] = new float [gSize];
+	     for (int i = 0; i < gSize; i++)
+	       dGxy[j][i] = (1 / (2 * PI * pow(sigma, 6)))
+		 * ((float)x[j][i] * (float)y[j][i]) *
+		 (exp(-(pow((float)x[j][i], 2) + pow((float)y[j][i], 2))
+		      / (2 * pow(sigma, 2))));
+	   }
+	      
+	 delete[] x, y;
+
+	//Convolution
+	float sumxx, sumyy, sumxy;
+	int kernel = floor(gSize / 2);
+	for (int j = 0; j < m; j++)
+	  {
+	    hxx[j] = new float [n];
+	    hyy[j] = new float [n];
+	    hxy[j] = new float [n];
+	    for (int i = 0; i < n; i++)
+	      {
+		sumxx = 0;
+		sumyy = 0;
+		sumxy = 0;
+		for (int k = -kernel; k <= kernel; k++)
+		  {
+		    for (int h = -kernel; h <= kernel; h++)
+		      {
+                        if((j-k >= 0) && (i-h >= 0) && (j-k < m) && (i-h < n))
+			  {
+			    sumxx = sumxx + (dGxx[k + kernel][h + kernel] * (float)ig[j - k][i - h]);
+			    sumyy = sumyy + (dGyy[k + kernel][h + kernel] * (float)ig[j - k][i - h]);
+			    sumxy = sumxy + (dGxy[k + kernel][h + kernel] * (float)ig[j - k][i - h]);
+			  }
+		      }
+		  }
+		hxx[j][i] = sumxx;
+		hyy[j][i] = sumyy;
+		hxy[j][i] = sumxy;
+	      }
+	  }        
+
+        delete[] dGxx, dGyy, dGxy;
+
+	//Determinant of Hessian
+	for (int j = 0; j < m; j++)
+	  {
+	    detH[j] = new float [n];
+	    for (int i = 0; i < n; i++)
+	      detH[j][i] =(hxx[j][i] * hyy[j][i]) -(hxy[j][i] * hxy[j][i]);
+	  }
+
+	delete[] hxx, hyy, hxy;
+
+	//Non-maximum Suppression using a 3x3 window
+	float* subI = new float [9]();
+	float* nms_vector = new float [m*n]();
+	for (int j = 0; j < m; j++)
+	  for (int i = 0; i < n; i++)
+	    if ((j-1 >= 0) && (j+1 < m) && (i-1 >= 0) && (i+1 < n))
+	      {
+		subI[0] = detH[j - 1][i - 1];
+		subI[1] = detH[j - 1][i];
+		subI[2] = detH[j - 1][i + 1];
+		subI[3] = detH[j][i - 1];
+		subI[4] = detH[j][i];
+		subI[5] = detH[j][i + 1];
+		subI[6] = detH[j + 1][i - 1];
+		subI[7] = detH[j + 1][i];
+		subI[8] = detH[j + 1][i + 1];
+
+		float mx = max(subI, 9);
+		if(subI[4] == mx)
+		  nms_vector[i + (j*n)] = mx;
+	      }
+
+	delete[] subI, detH;
+
+	thres = max(nms_vector, m*n) * hthres;
+
+	int l = 0;
+	for (int nL = 0; nL < m*n; nL++)
+	  if (nms_vector[nL] > thres)
+	    { 
+	      *(xCoords + l) = (nL % n);
+	      *(yCoords + l) = (nL / n);
+	      l++;
+	    }
+
+	return l;  
+}
+
+float* ransac_2dline(float eta0rl, float eta0ll, float idrl, float idll, int xCoords[], int yCoords[], int l)
+{
+	float* lines = new float[2];
+	int m = 480;
+	int n = 640;
+	int numPts = 2;
+	int k = 1;
+	float e = numPts / l;
+	int iStar = 0;
+	float eta = pow(1 - pow(e, numPts), k);
+	float mFinal = 0;
+	float cFinal = 0;
+        int i1 = 0;
+        int i2 = 0;
+	int sampleX[2];
+	int sampleY[2];
+	float mLine, cLine;
+	float dist[l];
+	float d[l];
+	int outX[l];
+	int outY[l];
+	int ofX[l];
+	int ofY[l];
+	int oD;
+
+
+	while (eta >= eta0rl)
+	  {
+        int iD = 0;
+	oD = 0;
+ 
+	  while(i1 == i2){
+		i1 = rand() % l;
+		i2 = rand() % l;}
+		sampleX[0] = xCoords[i1];
+		sampleX[1] = xCoords[i2];
+		sampleY[0] = yCoords[i1];
+		sampleY[1] = yCoords[i2];
+
+	        mLine = (float)(sampleY[1] - sampleY[0]) / (sampleX[1] - sampleX[0]);
+		cLine = sampleY[0] - mLine * sampleX[0];
+
+		for (int i = 0; i < l; i++)
+		{
+		  dist[i] = (float)(xCoords[i] + mLine * yCoords[i] - mLine * cLine) / ((pow(mLine, 2)) + 1);
+	          d[i] = sqrt(pow((dist[i] - xCoords[i]), 2) + pow((mLine * dist[i] + cLine - l), 2));
+		}
+		 
+                float mx = max(d, l);
+
+		for (int i = 0; i < l; i++)
+	            if (d[i] <= idrl * mx)
+			    iD++;
+		    else
+		    	{
+		             outX[oD] = xCoords[i];
+		    	     outY[oD] = yCoords[i];
+		    	     oD++;
+		    	}
+
+	       
+			if (iD > iStar)
+			{
+				for (int i = 0; i < oD; i++)
+				{
+					ofX[i] = outX[i];
+					ofY[i] = outY[i];
+				}
+				
+				iStar = iD;
+			        e =(float) iStar / l;
+				mFinal = mLine;
+				cFinal = cLine;
+			}
+			k = k + 1;
+			eta = pow((1 - pow(e, numPts)), k);
+	}
+
+	*lines = mFinal;
+        *(lines + 1) = cFinal;
+
+
+ 	k = 1;
+	e = numPts / oD;
+	iStar = 0;
+	eta = pow(1 - pow(e, numPts), k);
+	mFinal = 0;
+	cFinal = 0;
+	float dist2[oD];
+	float d2[oD];
+
+	while (eta >= eta0ll)
+	  {    int iD = 0;
+             	while(i1 == i2){
+		i1 = rand() % l;
+		i2 = rand() % l;}
+		sampleX[0] = ofX[i1];
+		sampleX[1] = ofX[i2];
+		sampleY[0] = ofY[i1];
+		sampleY[1] = ofY[i2];
+	        mLine = (float) (sampleY[1] - sampleY[0]) / (sampleX[1] - sampleX[0]);
+		cLine = sampleY[0] -( mLine * sampleX[0]);
+		for (int i = 0; i < oD; i++)
+		{
+		  dist2[i] = (float)(ofX[i] + mLine * ofY[i] - mLine * cLine) / ((pow(mLine, 2)) + 1);
+	          d2[i] = sqrt(pow((dist2[i] - ofX[i]), 2) + pow((mLine * dist2[i] + cLine - oD), 2));
+		}
+
+ 	        float mx = max(d2, oD);
+
+		for (int i = 0; i < oD; i++)
+	            if (d2[i] <= idll * mx)
+		       iD++;
+			
+		if (iD > iStar)
+		{
+			iStar = iD;
+		        e = (float)iStar / oD;
+			mFinal = mLine;
+			cFinal = cLine;
+		}
+		k = k + 1;
+		eta = pow(1 - pow(e, numPts), k);
+	}
+	  *(lines + 2) = mFinal;
+	  *(lines + 3) = cFinal;
+
+	return lines;
+	
+}
+
+
+void drawmarkers(unsigned char *OVL)
+{
+    int i,j,k;
+
+    for (i=0; i<FRAMEWIDTH; i++) {
+      *(OVL+ FIRSTSCAN*FRAMEWIDTH+i)= YELLOW;
+      *(OVL+ (FIRSTSCAN+1)*FRAMEWIDTH+i)= YELLOW;
+      *(OVL+ (FIRSTSCAN-LOOKAHEAD*SCANINT)*FRAMEWIDTH+i)= YELLOW;
+      *(OVL+ (FIRSTSCAN-LOOKAHEAD*SCANINT+1)*FRAMEWIDTH+i)= YELLOW;
+      *(OVL+ (FIRSTSCAN-NUMSCANS*SCANINT)*FRAMEWIDTH+i)= YELLOW;
+      *(OVL+ (FIRSTSCAN-NUMSCANS*SCANINT+1)*FRAMEWIDTH+i)= YELLOW;
+      *(OVL+ MARKSCAN*FRAMEWIDTH+i)= GREEN;
+      *(OVL+ (MARKSCAN+1)*FRAMEWIDTH+i)= GREEN;
+    }
+    for (i=0; i<FRAMEHEIGHT; i++) {
+      *(OVL+ i*FRAMEWIDTH+CENTER)= GREEN;
+      *(OVL+ i*FRAMEWIDTH+CENTER+1)= GREEN;
+    }
+    for (i=-10; i<10; i++) {
+      *(OVL+ (MARKSCAN+i)*FRAMEWIDTH+MARKLEFT)= GREEN;
+      *(OVL+ (MARKSCAN+i)*FRAMEWIDTH+MARKLEFT+1)= GREEN;
+      *(OVL+ (MARKSCAN+i)*FRAMEWIDTH+MARKRIGHT)= GREEN;
+      *(OVL+ (MARKSCAN+i)*FRAMEWIDTH+MARKRIGHT+1)= GREEN;
+    }
+    for (i=CENTER-250; i<CENTER+251; i+=50)
+      for (j=-5; j<5; j++) {
+        *(OVL+ (FIRSTSCAN+j)*FRAMEWIDTH+i)= YELLOW;
+        *(OVL+ (FIRSTSCAN+j)*FRAMEWIDTH+i+1)= YELLOW;
+      }
+}
+
+
+void extractlane(unsigned char *FGBuf, struct LaneIO *X)
+{
+    int i,j,k,l;
+    int scanline, scanavg, scanstd, scanloc[NUMPEAKS], scanval[NUMPEAKS];
+    int leftfound, rightfound, point1, point1val, point2, halfwidth;
+    int lefta, righta, leftb, rightb, leftc, rightc;
+    int fitx[NUMSCANS];
+    double ftemp;
+    int basediff1, basediffcnt, basedifftotal;
+
+
+    for (i=0; i<NUMSCANS; i++) {
+      *(X->center+i)=0; *(X->width+i)=0;
+      *(X->left+i)=0; *(X->right+i)=0;
+      *(fitx+i)=i;
+    }
+    for (i=0; i<3; i++) {
+      *(X->fitcoef3+i)=*(X->fitcoef2+i);
+      *(X->fitcoef2+i)=*(X->fitcoef1+i);
+      *(X->fitcoef1+i)=0.0;
+    }
+    basediffcnt=0; basedifftotal=0;
+    
+#if 0
+    printf("%f\n",X->basediff);
+#endif
+
+    imagepoints(FGBuf, FIRSTSCAN, NUMPEAKS, scanloc, scanval, 
+		&scanavg, &scanstd);
+
+    leftfound=0; rightfound=0; 
+    lefta=0; righta=0; leftb=0; rightb=0; leftc=0; rightc=0;
+
+    point1= *(X->fitcoef2+0);          // Look at previous frame
+    if (point1 != 0.0) {
+      qualifypoints(&lefta, NUMPEAKS, scanloc, scanval, scanavg, scanstd,
+		    X->Qualify1, point1-X->basediff/2, 15);
+      qualifypoints(&righta, NUMPEAKS, scanloc, scanval, scanavg,scanstd,
+		    X->Qualify1, point1+X->basediff/2, 15);
+    }
+    point1= *(X->fitcoef3+0);          // Look 2 frames previous
+    if ( (lefta==0) && (point1!=0.0) ) 
+      qualifypoints(&lefta, NUMPEAKS, scanloc, scanval, scanavg, scanstd,
+		    X->Qualify1, point1-X->basediff/2, 30);
+    if ( (righta==0) && ( point1!=0.0) )
+      qualifypoints(&righta, NUMPEAKS, scanloc, scanval, scanavg, scanstd,
+		    X->Qualify1, point1+X->basediff/2, 30);
+				     // Assume camera centered in lane 
+    qualifypoints(&leftc, NUMPEAKS, scanloc, scanval, scanavg, scanstd,
+		  X->Qualify1, QLEFTC, QLEFTW);
+    qualifypoints(&rightc, NUMPEAKS, scanloc, scanval, scanavg, scanstd,
+		  X->Qualify1, QRIGHTC, QRIGHTW);
+				  // If we found something, look across lane
+    if ( (lefta!=0) && ( (lefta+X->basediff)<XMAX) ) {
+      localpoints(FGBuf, FIRSTSCAN,lefta+X->basediff,SCANWIDTH,RIGHTFILTER,
+		  &point1,&point1val,&scanavg, &scanstd);
+      if ((scanstd>X->Qualify3)&&(point1val>(scanavg+X->Qualify2*scanstd))) {
+	rightb= point1;
+      }
+    }
+    if ( (righta!=0) && ((righta-X->basediff)>XMIN) ) {
+      localpoints(FGBuf, FIRSTSCAN,righta-X->basediff,SCANWIDTH,LEFTFILTER,
+		  &point1,&point1val, &scanavg, &scanstd);
+      if ((scanstd>X->Qualify3)&&(point1val>(scanavg+X->Qualify2*scanstd))) {
+	leftb=point1;
+      }
+    }
+	
+    if ( leftb!=0) {
+      leftfound=leftb; 
+      rightfound=righta;
+    }
+    else if ( rightb!=0 ) {
+      rightfound=rightb; 
+      leftfound=lefta;
+    }
+    if ( (leftfound==0) && (lefta!=0) )  
+      leftfound=lefta;
+    if ( (rightfound==0) && (righta!=0) ) 
+      rightfound=righta;
+    if (leftfound==0) 
+      leftfound=leftc;
+    if (rightfound==0) 
+      rightfound=rightc;
+    
+    if ( (leftfound!=0) && (rightfound!=0) ) {
+      *(X->width+0)= (rightfound-leftfound);
+      *(X->center+0)= (rightfound+leftfound)/2;
+      *(X->left+0)=leftfound; 
+      *(X->right+0)=rightfound;
+      basediffcnt++; 
+      basedifftotal= rightfound-leftfound;
+    } else if (leftfound!=0) {
+      *(X->width+0)= X->basediff;
+      *(X->center+0)= leftfound+X->basediff/2;
+      *(X->left+0)=leftfound;
+      *(X->right+0)=0;
+    } else if (rightfound!=0) {
+      *(X->width+0)= X->basediff;
+      *(X->center+0)= rightfound-X->basediff/2;
+      *(X->right+0)=rightfound;
+      *(X->left+0)=0;
+    } else {
+      *(X->width+0)=0;
+      *(X->center+0)=0;
+      *(X->left+0)=0; 
+      *(X->right+0)=0;
+    }
+
+    for (i=1; i<NUMSCANS; i++) {     /* Now work up the image buffer */
+      leftfound=0; rightfound=0;
+      lefta=0; righta=0; leftb=0; rightb=0; leftc=0; rightc=0;
+      j= FIRSTSCAN- i*SCANINT; 
+      point2= *(X->center+i-1);                // look from below
+      halfwidth= (*(X->xdiff+i) * X->basediff)/2;
+      if ( point2 != 0 ) {  
+	localpoints(FGBuf, j, point2-halfwidth, SCANWIDTH, LEFTFILTER, &point1,
+		    &point1val, &scanavg, &scanstd);
+	if ( (scanstd>X->Qualify3)&&(point1val>(scanavg+X->Qualify2*scanstd))) 
+	  lefta= point1;
+	localpoints(FGBuf, j, point2+halfwidth, SCANWIDTH, RIGHTFILTER,&point1,
+		    &point1val, &scanavg, &scanstd);
+	if ( (scanstd>X->Qualify3)&&(point1val>(scanavg+X->Qualify2*scanstd))) 
+	  righta= point1;
+      }
+      
+      point2= *(X->fitcoef2+0)+ *(X->fitcoef2+1)*i+ *(X->fitcoef2+2)*i*i;
+					      // look from last time
+      if ( point2!=0 ) {
+	localpoints(FGBuf, j, point2-halfwidth, SCANWIDTH,LEFTFILTER, &point1,
+		    &point1val, &scanavg, &scanstd);
+	if ( (scanstd>X->Qualify3)&&(point1val>(scanavg+X->Qualify2*scanstd))) 
+	  leftb= point1;
+	localpoints(FGBuf, j, point2+halfwidth, SCANWIDTH, RIGHTFILTER,&point1,
+		    &point1val, &scanavg, &scanstd);
+	if ( (scanstd>X->Qualify3)&&(point1val>(scanavg+X->Qualify2*scanstd))) 
+	  rightb= point1;
+      }
+	 
+      if (lefta!=0) 
+	leftfound=lefta; 
+      else 
+	leftfound=leftb;
+      if (righta!=0) 
+	rightfound=righta; 
+      else 
+	rightfound=rightb;
+	 
+      ftemp=0.0;
+      if ( (leftfound!=0)&&(rightfound!=0) ) {
+	*(X->left+i)=leftfound; *(X->right+i)=rightfound;
+	ftemp= (rightfound-leftfound)/ (float) X->basediff;
+	if ( ftemp< (*(X->xdiff+i)+ DELTAXDIFF) ) {
+	  *(X->width+i)= (rightfound-leftfound);
+	  *(X->center+i)= (rightfound+leftfound)/2;
+          if (i<10) {
+	    basediffcnt++; 
+	    basedifftotal+= (rightfound-leftfound)/ *(X->xdiff+i);
+	  }
+	}
+      } 
+      else if (leftfound!=0)  {
+	*(X->left+i)=leftfound;
+	*(X->center+i)= leftfound+halfwidth;
+	*(X->width+i)= 2*halfwidth;
+	*(X->right+i)=0;
+      } 
+      else if (rightfound!=0) {
+	*(X->right+i)=rightfound;
+	*(X->left+i)=0;
+	*(X->width+i)= 2*halfwidth;
+	*(X->center+i)= rightfound-halfwidth;
+      }
+      else {
+	*(X->width+i)=0;
+	*(X->center+i)=0;
+	*(X->left+i)=0; 
+	*(X->right+i)=0;
+      }
+#if LEFTONLY==1
+      if (leftfound!=0) {
+         *(X->left+i)=leftfound;
+         *(X->right+i)=0;
+         *(X->center+i)= leftfound+halfwidth;
+         *(X->width+i)= 2*halfwidth;
+      } else {
+         *(X->left+i)=0;
+         *(X->right+i)=0;
+         *(X->center+i)+0;
+         *(X->width+i)=0;
+      }
+#endif
+#if RIGHTONLY==1
+      if (rightfound!=0) {
+         *(X->right+i)= rightfound;
+         *(X->left+i)=0;
+         *(X->center+i)= rightfound-halfwidth;
+         *(X->width+i)+ 2*halfwidth;
+      } else {
+         *(X->right+i)= 0;
+         *(X->left+i)= 0;
+         *(X->center+i)= 0;
+         *(X->width+i)= 0;
+      }
+#endif
+    } 
+
+#if 1
+    if ( basediffcnt>3) {
+      basediff1= basedifftotal/basediffcnt;
+      if ( abs(BASEDIFF-basediff1)<BASEDIFFRANGE )
+	X->basediff=basediff1;
+    }
+#endif
+#if 1
+    X->basediff=BASEDIFF;
+#endif
+
+    quadfit(NUMSCANS, fitx, X->center, X->fitcoef1);
+#if 1   // if you know the road is fairly straight, do a line fit
+        //    to reduce risk of a bizarre result
+    *(X->center+0)= 0.0;
+    linefit(NUMSCANS, fitx, X->center, X->fitcoef1);
+    if (fabs(*(X->fitcoef1+2))>0.4)
+       linefit(NUMSCANS, fitx, X->center, X->fitcoef1);
+#endif
+
+    X->quality=0;
+    for (i=0; i<NUMSCANS; i++) 
+      if ( *(X->center+i) != 0) 
+	X->quality++;
+}
+
+
+void localpoints(unsigned char *FGBuf, int scanline, int center, int width,int leftright,
+	    int *scanloc, int *scanval, int *scanavg, int *scanstd)
+/* localpoints() extracts the brightest point from part of a scanline
+   across the image.  
+*/
+{                                         
+    int i,j,k,l, avg=0, peakval, peakloc, savg=0;
+    static int vector[FRAMEWIDTH];
+
+    peakloc=0; peakval=0;
+    if ((center-width)<0)  
+       center=width;
+    if ((center+width)>FRAMEWIDTH) 
+       center=FRAMEWIDTH-width;
+
+    for (i=(center-width); i<(center+width); i++) {
+      avg=0;
+#if SPOTFILT                          /* this is the bright spot filter */
+      for (j= (scanline-DEPTH); j<= (scanline+DEPTH); j++) {
+	l= j*FRAMEWIDTH+i;
+	for (k= -LINEWIDTH; k<= LINEWIDTH; k++)
+	  avg+= *(FGBuf+l+k);
+      }
+      avg= avg/ ((2*LINEWIDTH+1)*(2*DEPTH+1));
+#endif
+#if MATCHEDFILT                       /* this is the matched filter */
+	/* Filter gains: symmetric:  -6  17 -6 
+	   Filter gains: assymetric:  -3 17 -9  */
+      for (j= (scanline-DEPTH); j<= (scanline+DEPTH); j++) {
+	l= j*FRAMEWIDTH+i;
+	if (leftright==LEFTFILTER) {
+	  for (k= -BREADTH; k< -LINEWIDTH; k++)
+	    avg+= -9*(*(FGBuf+l+k));
+	  for (k= -LINEWIDTH; k<= LINEWIDTH; k++)
+	    avg+= 17*(*(FGBuf+l+k));
+	  for (k= LINEWIDTH+1; k<= BREADTH; k++)
+	    avg+= -3*(*(FGBuf+l+k));
+	} 
+	else {
+	  for (k= -BREADTH; k< -LINEWIDTH; k++)
+	    avg+= -3*(*(FGBuf+l+k));
+	  for (k= -LINEWIDTH; k<= LINEWIDTH; k++)
+	    avg+= 17*(*(FGBuf+l+k));
+	  for (k= LINEWIDTH+1; k<= BREADTH; k++)
+	    avg+= -9*(*(FGBuf+l+k));
+	}
+      }
+      avg= avg/ ((2*BREADTH+1)*(2*BREADTH+1));
+#endif
+      savg += avg;
+      *(vector+i)= avg;
+      if (avg>peakval) {
+	peakval=avg; peakloc=i;
+      }
+    }
+    *scanloc= peakloc;  *scanval= peakval;
+    savg= savg/ (2*width+1);
+    *scanavg = savg;
+    avg=0;
+    for (i=(center-width); i<(center+width); i++)
+      avg+= (savg- *(vector+i)) * (savg- *(vector+i));
+    *scanstd= sqrt(avg/(2*width+1));
+}
+
+
+void imagepoints(unsigned char *FGBuf, int scanline, int numpeaks,
+	    int *scanloc, int *scanval, int *scanavg, int *scanstd)
+/* imagepoints() extracts bright points from a scanline across the image.
+   A box windowed average is computed across the scanline.
+   Then the average and standard deviation of the (window averaged) scanline
+   vector are computed.
+   Then the NUMPEAKS brightest points are found, brightest peak first.
+   Both the location and the (averaged) brightness of the peaks are stored.
+   A region of MINSEP pixels is blanked around each bright point as it
+   is identified in order to force distinct peaks to be found.
+*/
+{
+    int i,j,k,l, line, peak, avg=0, savg=0, peakval, peakloc;
+    static int vector[FRAMEWIDTH];
+
+    for (i=XMIN; i<XMAX; i++) {
+      avg=0;
+
+#if SPOTFILT                    /* this is the bright spot filter */
+      for (j= (scanline-DEPTH); j<= (scanline+DEPTH); j++) {
+	l= j*FRAMEWIDTH+i;
+	for (k= -LINEWIDTH; k<= LINEWIDTH; k++)
+	  avg+= *(FGBuf+l+k);
+      }
+      avg= avg/((2*LINEWIDTH+1)*(2*DEPTH+1));
+#endif
+#if MATCHEDFILT                 /* this is the matched filter */
+      for (j= (scanline-DEPTH); j<= (scanline+DEPTH); j++) {
+	l= j*FRAMEWIDTH+i;
+	for (k= -BREADTH; k< -LINEWIDTH; k++) 
+	  avg+= -6*(*(FGBuf+l+k));
+	for (k= -LINEWIDTH; k<= LINEWIDTH; k++)
+	  avg+= 17*(*(FGBuf+l+k));
+	for (k= LINEWIDTH+1; k<= BREADTH; k++)
+	  avg+= -6*(*(FGBuf+l+k));
+      }
+      avg= avg/((2*BREADTH+1)*(2*DEPTH+1));
+#endif
+      *(vector+i)= avg;
+      savg+= avg;
+    }
+
+    savg = savg/ (XMAX-XMIN);
+    avg=0;
+    for (i=XMIN; i<XMAX; i++)
+      avg+= (savg- *(vector+i)) * (savg- *(vector+i));
+    *scanavg= savg;
+    *scanstd= sqrt(avg/(XMAX-XMIN));
+
+			       /*hunt for the largest peaks*/
+    for (peak=0; peak<numpeaks; peak++) {
+      peakloc=0; peakval= -999;
+      for (i=XMIN; i<XMAX; i++) {
+	j= *(vector+i);
+	if (j> peakval) {
+	  peakval=j; peakloc=i; 
+	}
+      }
+      j= peakloc-MINSEP; if (j<0) j=0;
+      k= peakloc+MINSEP; if (k>FRAMEWIDTH) k=FRAMEWIDTH;
+      for (i= j; i< k; i++)
+	*(vector+i)=0;
+      *(scanloc+peak)=peakloc; 
+      *(scanval+peak)=peakval;
+    }
+}    
+       
+
+void qualifypoints(int *point, int numpeaks, int *scanloc, int *scanval, 
+	      int scanavg, int scanstd, float qual, int center, int width)
+/* Qualifypoints() checks that identified points are bright enough and
+   within certain regions of the screen.
+*/
+{
+    int i,j,k,qualify,pointval, tempval,temploc;
+
+    qualify= scanavg + qual*scanstd;
+    *point=0; pointval=0;
+/* We take the brightest point that is within the specified range. */
+    for (i=0; i<numpeaks; i++) {
+      temploc= *(scanloc+i);  
+      tempval= *(scanval+i);
+      if ( ( tempval > qualify ) && ( tempval > pointval ) 
+	   && ( temploc > (center-width) )
+	   && ( temploc < (center+width) ) ) {
+	*point=temploc; pointval= tempval;
+      }
+    }
+}
+
+
+void enhancecontrast(unsigned char *FGBuf, int firstpass)
+/*  Adjust the Smarteye Frame Grabber video levels to maximize the 
+contrast in the presence of changing lighting conditions*/
+{
+    static int blacklevel, whitelevel;
+    int minval, maxval, i;
+    unsigned char *vb0ptr;
+
+#if 0
+    if (firstpass == 1) {
+      blacklevel=128; whitelevel=128;
+//      MdigReference(MilDig,M_BLACK_REF,blacklevel); 
+      MdigReference(MilDig, M_BRIGHTNESS_REF, whitelevel);
+    }
+
+    vb0ptr= FGBuf+(FIRSTSCAN-15)*FRAMEWIDTH;
+    minval=255; maxval=0;
+    for (i=XMIN; i<XMAX; i++) {
+      if ( (*(vb0ptr+i))<minval )  
+	minval= *(vb0ptr+i);
+      if ( (*(vb0ptr+i))>maxval) 
+	maxval= *(vb0ptr+i);
+    }
+    vb0ptr= FGBuf+(FIRSTSCAN-NUMSCANS*SCANINT+15)*FRAMEWIDTH;
+    for (i=XMIN; i<XMAX; i++) {
+      if ( (*(vb0ptr+i))<minval )  
+	minval= *(vb0ptr+i);
+      if ( (*(vb0ptr+i))>maxval) 
+	maxval= *(vb0ptr+i);
+    }
+
+    if (minval<10) blacklevel-=1;
+    if (minval>25) blacklevel+=1;
+    if (maxval<215) whitelevel+=1;
+    if (maxval>230) whitelevel-=1;
+    if (blacklevel<0) blacklevel=0; 
+    if (blacklevel>255) blacklevel=255;
+    if (whitelevel>255) whitelevel=255;
+    if (whitelevel<0) whitelevel=0;
+    MdigReference(MilDig,M_BRIGHTNESS_REF, whitelevel); 
+    MdigReference(MilDig, M_CONTRAST_REF,blacklevel);
+#endif
+#if 0  /*  Debugging Printouts   */
+    printf("%d %d\n%d %d\n",left,right,blklevel,whitelevel);
+#endif
+}
+
+
+void drawpoint1l(unsigned char *DISPBuf,int point,int scanline)               
+/* Drawpoint1() marks specified points on the display (with blocks).  */ 
+{
+    int i,j; 
+    for (i= scanline-4; i< scanline+4; i++)
+      for (j=-LINEWIDTH; j<0; j++) {
+	*(DISPBuf+ i*FRAMEWIDTH+ j+ point)=0;
+	*(DISPBuf+ i*FRAMEWIDTH+j+LINEWIDTH+point)=255;
+      }
+}
+
+
+void drawpoint1r(unsigned char *DISPBuf, int point,int scanline)               
+/* Drawpoint1r() marks specified points on the display (with blocks).  */ 
+{
+    int i,j; 
+    for (i= scanline-4; i< scanline+4; i++)
+      for (j=-LINEWIDTH; j<0; j++) {
+	*(DISPBuf+ i*FRAMEWIDTH+ j+ point)=255;
+	*(DISPBuf+ i*FRAMEWIDTH+j+LINEWIDTH+point)=0;
+      }
+}
+
+
+void drawpoint2(unsigned char *DISPBuf, int point,int scanline)               
+/* Drawpoint2() marks specified points on the display (with x).  */ 
+{
+    int i,j; 
+    for (i= scanline-4; i< scanline+4; i++) {
+      *(DISPBuf+i*FRAMEWIDTH+point-(i-scanline))=255;
+      *(DISPBuf+i*FRAMEWIDTH+point+(i-scanline))=255;
+    }
+}
+
+
+void drawline(unsigned char *DISPBuf, int x1, int y1, int x2, int y2)
+/* Drawline draws a 3 pixel wide line on the screen */
+{
+    int i,j;
+    unsigned char *vb0ptr;
+    float scale;
+   
+    if (y2<y1) {
+      i=x2; x2=x1; x1=i; i=y2; y2=y1; y1=i;
+    }
+
+    scale= (float) (x2-x1)/(y2-y1);
+    for (i=y1; i<=y2; i++) {
+      vb0ptr= DISPBuf+i*FRAMEWIDTH + x1 + (int) ((i-y1)*scale);
+      *(vb0ptr-1) = 0;
+      *(vb0ptr) = 0;
+      *(vb0ptr+1) = 0;
+    }
+}       
+
+
+/*fit a quadratic to data in a least squares sense.
+     y= *(coef+0)+ *(coef+1)*x + *(coef+2)*x*x
+*/
+void quadfit(int size, int *x, int *y, double *coef)
+{
+    int i;
+    double xd,yd,n,sx,sx2,sx3,sx4,sy,sxy,sx2y,dtemp, dtemp1;
+  
+    n=0; sx=0; sx2=0; sx3=0; sx4=0; sy=0; sxy=0; sx2y=0; dtemp=0;
+  
+    for (i=0; i<size; i++) {
+      if (*(y+i)!=0) {
+	xd= *(x+i);
+	yd= *(y+i);
+	n++;
+	sy+= yd;
+	dtemp= xd;
+	sx+= dtemp;
+	sxy+= dtemp* yd;
+	dtemp = dtemp*dtemp;
+	sx2+= dtemp;
+	sx2y+= dtemp* yd;
+	dtemp= dtemp* xd;
+	sx3+= dtemp;
+	sx4+= dtemp* xd;
+      }
+    }
+    
+#if 0
+    printf("%e %e %e %e %e\n",n,sx,sx2,sx3,sx4);
+    printf("%e %e %e\n",sy,sxy,sx2y);
+#endif
+    
+    dtemp= -n*sx2*sx4 + n*sx3*sx3 + sx*sx*sx4 - 2.0*sx3*sx*sx2 + sx2*sx2*sx2;
+#if 0
+    printf("%e\n",dtemp);
+#endif   
+
+    if (dtemp!=0.0) {
+      dtemp1= sx*sx3*sx2y - sx*sxy*sx4 + sx2*sx3*sxy - sx2*sx2*sx2y +
+	sy*sx2*sx4 - sy*sx3*sx3;
+#if 0
+      printf("%e\n",dtemp1);
+#endif
+      *(coef+0)= -dtemp1/dtemp;
+      
+      dtemp1= n*sx3*sx2y - n*sxy*sx4 + sxy*sx2*sx2 - sx2*sx*sx2y - 
+	sx2*sx3*sy + sx*sy*sx4;
+#if 0
+      printf("%e\n",dtemp1);
+#endif
+      *(coef+1)= dtemp1/dtemp;
+
+      dtemp1= sx3*sx*sy - sx*sx*sx2y - n*sx3*sxy + n*sx2*sx2y + sx*sx2*sxy -
+	sx2*sx2*sy;
+#if 0
+      printf("%e\n",dtemp1);
+#endif
+      *(coef+2)= -dtemp1/dtemp;
+    }
+    else {
+      *(coef+0)= CENTER; *(coef+1)=0.0; *(coef+2)=0.0;
+    }
+}
+
+
+/*fit a line to data in a least squares sense.
+     y= *(coef+0)+ *(coef+1)*x + *(coef+2)*x*x
+*/
+void linefit(int size, int *x, int *y, double *coef)
+{
+    int i;
+    double xd,yd,n,sx,sx2,sx3,sx4,sy,sxy,sx2y,dtemp, dtemp1;
+  
+    n=0; sx=0; sx2=0; sx3=0; sx4=0; sy=0; sxy=0; sx2y=0; dtemp=0;
+
+/*   16 June Hack i=0 to i=1  kar  */  
+    for (i=1; i<size; i++) {
+      if (*(y+i)!=0) {
+	xd= *(x+i);
+	yd= *(y+i);
+	n++;
+	sy+= yd;
+	dtemp= xd;
+	sx+= dtemp;
+	sxy+= dtemp* yd;
+	dtemp = dtemp*dtemp;
+	sx2+= dtemp;
+      }
+    }
+    
+#if 0
+    printf("%e %e %e %e %e\n",n,sx,sx2,sx3,sx4);
+    printf("%e %e %e\n",sy,sxy,sx2y);
+#endif
+
+    dtemp= sx2-sx*sx/n;
+#if 0
+    printf("%e\n",dtemp);
+#endif   
+
+    if ( (dtemp!=0.0) && (n>0) ) {
+      dtemp1= sxy-sx*sy/n;
+#if 0
+      printf("%e\n",dtemp1);
+#endif
+      *(coef+1)= dtemp1/dtemp;
+      *(coef+0)= (sy-*(coef+1)*sx)/n;
+      *(coef+2)=0.0; 
+    }
+    else {
+      *(coef+0)= CENTER; 
+      *(coef+1)=0.0; 
+      *(coef+2)=0.0;
+    }
+    if ( (*(coef+1)>5.0 ) || (*(coef+1)<-5.0) ) {
+      *(coef+0)=CENTER; 
+      *(coef+1)=0.0; 
+      *(coef+2)=0.0;
+    }
+}
+
+
+void outputresults(unsigned char *DISPBuf, struct LaneIO X, int seqnum)
+/*  Display and output our results */
+{
+    int i;
+    int offsetpixels;
+    float offsetdist;
+    int yd, yd1, yoff, yoff1; 
+
+
+    yd= *(X.fitcoef1+0);    /*special case: eval for f(x=0) */
+    yoff= X.basediff;
+printf("Qual %d\n", X.quality);
+if (X.quality>15) {
+    for (i=1; i<NUMSCANS; i++) {
+      yd1=yd;
+      yd= *(X.fitcoef1+0)+ *(X.fitcoef1+1)* i + *(X.fitcoef1+2)*i*i;
+      yoff1= yoff;
+      yoff= ( *(X.xdiff+i)*X.basediff)/2.0;
+      if (yd>0.0 && yd<FRAMEWIDTH && yd1>0.0 && yd1<FRAMEWIDTH)  
+	drawline (DISPBuf, yd1, FIRSTSCAN-(i-1)*SCANINT, 
+		  yd, FIRSTSCAN-i*SCANINT); 
+      if ( (yd-yoff)>0.0 && (yd1-yoff1)>0.0)
+	drawline (DISPBuf, yd1-yoff1, FIRSTSCAN-(i-1)*SCANINT,
+		  yd-yoff, FIRSTSCAN-i*SCANINT);
+      if ( (yd+yoff)<FRAMEWIDTH && (yd1+yoff1)<FRAMEWIDTH)
+	drawline (DISPBuf, yd1+yoff1, FIRSTSCAN-(i-1)*SCANINT,
+		  yd+yoff, FIRSTSCAN-i*SCANINT);
+    }
+}
+
+    for (i=0; i<NUMSCANS; i++) {
+      if ( *(X.left+i)!=0) 
+	drawpoint1l( DISPBuf, *(X.left+i), FIRSTSCAN-i*SCANINT);
+      if ( *(X.right+i)!=0)
+	drawpoint1r( DISPBuf, *(X.right+i), FIRSTSCAN-i*SCANINT);
+      if ( *(X.center+i) != 0) {
+	drawpoint2( DISPBuf, *(X.center+i), FIRSTSCAN-i*SCANINT );
+      }
+    }
+
+
+#if 1
+    if ( *(X.center+LOOKAHEAD)!=0 )
+      offsetpixels= *(X.center+LOOKAHEAD)-CENTER;
+    else offsetpixels= 9999; 
+
+    offsetpixels= *(X.fitcoef1+0)+ *(X.fitcoef1+1)*LOOKAHEAD + 
+      *(X.fitcoef1+2)*LOOKAHEAD*LOOKAHEAD- CENTER;
+Goffsetpixels= offsetpixels;
+#endif
+#if 0
+    i= -0.015*offsetpixels*100.0;
+    DecimalOut(i);
+    DecimalOut1(X.quality);
+    DecimalOut(0);
+    DecimalOut(0);
+    _outp(COM1BASE+THR,0x0d);
+#endif
+
+/* Various debugging printouts. */
+#if 0
+    printf("OffsetPixels %d\n",offsetpixels);
+#endif
+#if 0
+    printf("Equation %f %f %f\n",*(X.fitcoef1+0), *(X.fitcoef1+1), *(X.fitcoef1+2));
+    for (i=0; i<NUMSCANS; i++) 
+      printf("%d %d\n",*(X.center+i), *(X.width+i) );
+//    putchar(0x0d); putchar(0x0d);                   
+//    getchar();
+#endif
+
+}
+
+int adjustparams(struct LaneIO *X, char c1)
+{
+    int i,j,k, retcode;
+
+    retcode=0;
+#if 0
+    printf("   Row  Center  Width  Left  Right   fit\n");
+    for (i=NUMSCANS-1; i>=0; i--) {
+      printf("%5d  %5d  %5d  %5d  %5d    %f\n",
+               i,*(X->center+i),*(X->width+i),*(X->left+i), *(X->right+i), 
+               *(X->fitcoef1+0)+ *(X->fitcoef1+1)*i+ *(X->fitcoef1+2)*i*i);
+    }
+    printf("   Row  Center  Width  Left  Right   fit\n");
+    printf("Last: Qual1 %5.2f Qual2 %5.2f Qual3 %3d Basediff %5.2f Xdiffscale %5.2f\n",
+             X->Qualify1, X->Qualify2, X->Qualify3,
+             X->basediff,X->xdiffscale);
+    printf("Coefs: y= %5.2f + %5.3f x + %6.4f x^2, Quality= %d\n",
+             *(X->fitcoef1+0), *(X->fitcoef1+1), *(X->fitcoef1+2),
+             X->quality);
+    printf("Help: Qual1:a+/z- Qual2:s+/x- Qual3:d+/c- Bdiff:f+/v- Xdscale:g+/b- \n");
+#endif
+    switch (c1) {
+    case 'a': case 'A':
+      X->Qualify1+=0.1;
+      break;
+    case 'z': case 'Z':
+      X->Qualify1-=0.1;
+      break;
+    case 's': case 'S':
+      X->Qualify2+=0.1;
+      break;
+    case 'x': case 'X':
+      X->Qualify2-=0.1;
+      break;
+    case 'd': case 'D':
+      X->Qualify3+=1;
+      break;
+    case 'c': case 'C':
+      X->Qualify3-=1;
+      break;
+    case 'f': case 'F':
+      X->basediff+=5;
+      *(X->xdiff+0)=1.0;
+      for (i=1; i<NUMSCANS; i++)
+        *(X->xdiff+i)= (X->basediff-i*X->xdiffscale)/X->basediff;
+      break;
+    case 'v': case 'V':
+      X->basediff-=5;
+      *(X->xdiff+0)=1.0;
+      for (i=1; i<NUMSCANS; i++)
+        *(X->xdiff+i)= (X->basediff-i*X->xdiffscale)/X->basediff;
+      break;
+    case 'g': case 'G':
+      X->xdiffscale+= 0.1;
+      *(X->xdiff+0)=1.0;
+      for (i=1; i<NUMSCANS; i++)
+        *(X->xdiff+i)= (X->basediff-i*X->xdiffscale)/X->basediff;
+      break;
+    case 'b': case 'B':
+      X->xdiffscale-= 0.1;
+      *(X->xdiff+0)=1.0;
+      for (i=1; i<NUMSCANS; i++)
+        *(X->xdiff+i)= (X->basediff-i*X->xdiffscale)/X->basediff;
+      break;
+    case 'q': case 'Q':
+      retcode=1;
+      break;
+    case '1':
+      X->basediff= 495;
+      X->xdiffscale= 18.8;
+      *(X->xdiff+0)=1.0;
+      for (i=1; i<NUMSCANS; i++)
+         *(X->xdiff+i)= (X->basediff-i*X->xdiffscale)/X->basediff;
+      X->Qualify1= 2.1;
+      X->Qualify2= 2.3;
+      X->Qualify3= 12;
+      break;
+    case '2':
+      X->basediff= 470;
+      X->xdiffscale= 18.2;
+      *(X->xdiff+0)=1.0;
+      for (i=1; i<NUMSCANS; i++)
+         *(X->xdiff+i)= (X->basediff-i*X->xdiffscale)/X->basediff;
+      X->Qualify1= 2.1;
+      X->Qualify2= 2.2;
+      X->Qualify3= 11;
+      break;
+    case '3':
+      X->basediff= 400;
+      X->xdiffscale= 15.2;
+      *(X->xdiff+0)=1.0;
+      for (i=1; i<NUMSCANS; i++)
+         *(X->xdiff+i)= (X->basediff-i*X->xdiffscale)/X->basediff;
+      X->Qualify1= 1.9;
+      X->Qualify2= 1.9;
+      X->Qualify3= 8;
+      break;
+
+    default:
+      break;
+    }
+#if 0
+    printf("Current: Qual1 %5.2f Qual2 %5.2f Qual3 %d Basediff %5.2f Xdiffscale %5.2f\n",
+             X->Qualify1, X->Qualify2, X->Qualify3,
+             X->basediff,X->xdiffscale);
+#endif
+
+    return(retcode);
+}
+
+
+void initLaneIO(struct LaneIO *X)
+{
+   int i;
+
+   for (i=0; i<NUMSCANS; i++) {
+      *(X->xdiff+i)=0.0; *(X->center+i)=CENTER; *(X->width+i)=0.0;
+      *(X->left+i)=0; *(X->right+i)=0;
+   }
+   for (i=0; i<3; i++) {
+      *(X->fitcoef1+i)=0.0; *(X->fitcoef2+i)=0.0; *(X->fitcoef3+i)=0.0;
+   }
+   *(X->fitcoef1+0)= CENTER;
+   X->basediff= BASEDIFF;
+   X->xdiffscale= XDIFFSCALE;
+   X->Qualify1= QUALIFY1;
+   X->Qualify2= QUALIFY2;
+   X->Qualify3= QUALIFY3;
+   X->quality= 0;
+   *(X->xdiff+0)= 1.0;
+   for (i=0; i<NUMSCANS; i++)
+      *(X->xdiff+i)= (X->basediff-i*X->xdiffscale)/X->basediff;
+
+}
